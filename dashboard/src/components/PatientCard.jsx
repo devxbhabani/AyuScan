@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Heart, Activity, Thermometer, Droplet } from 'lucide-react';
 
 // A simple simulated Waveform chart using SVG
-const WaveformChart = ({ data, color, yMin, yMax }) => {
+const WaveformChart = ({ data, color, yMin, yMax, showGrid }) => {
   if (!data || data.length === 0) return null;
 
   // Normalize data points to SVG coordinates (0-100% width/height)
@@ -12,20 +12,45 @@ const WaveformChart = ({ data, color, yMin, yMax }) => {
   const minX = data[0].x;
   const maxX = data[data.length - 1].x;
   
+  let currentYMin = yMin;
+  let currentYMax = yMax;
+
+  if (currentYMin === undefined || currentYMax === undefined) {
+    const yValues = data.map(d => d.y);
+    currentYMin = currentYMin !== undefined ? currentYMin : Math.min(...yValues);
+    currentYMax = currentYMax !== undefined ? currentYMax : Math.max(...yValues);
+    const padding = (currentYMax - currentYMin) * 0.1 || 10;
+    currentYMin -= padding;
+    currentYMax += padding;
+  }
+  
   const points = data.map(d => {
     const normX = ((d.x - minX) / (maxX - minX)) * width;
     // Invert Y because SVG coordinates go down
-    const normY = height - (((d.y - yMin) / (yMax - yMin)) * height);
+    const normY = height - (((d.y - currentYMin) / (currentYMax - currentYMin)) * height);
     return `${normX},${normY}`;
   }).join(' ');
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="waveform-svg" preserveAspectRatio="none">
+    <svg viewBox={`0 0 ${width} ${height}`} className="waveform-svg" preserveAspectRatio="none" style={{ backgroundColor: 'transparent', borderRadius: '4px', overflow: 'hidden' }}>
+      {showGrid && (
+        <defs>
+          <pattern id="minorGrid" width="6" height="6" patternUnits="userSpaceOnUse">
+            <path d="M 6 0 L 0 0 0 6" fill="none" stroke="rgba(255, 255, 255, 0.05)" strokeWidth="0.5" />
+          </pattern>
+          <pattern id="majorGrid" width="30" height="30" patternUnits="userSpaceOnUse">
+            <rect width="30" height="30" fill="url(#minorGrid)" />
+            <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(255, 255, 255, 0.15)" strokeWidth="1" />
+          </pattern>
+        </defs>
+      )}
+      {showGrid && <rect width="100%" height="100%" fill="url(#majorGrid)" />}
+      
       <polyline 
         points={points} 
         fill="none" 
         stroke={color} 
-        strokeWidth="2"
+        strokeWidth="1.5"
         strokeLinejoin="round"
       />
     </svg>
@@ -104,7 +129,7 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
           <div className="waveform-box">
             <div className="waveform-title">ECG</div>
             <div className="waveform-canvas-container">
-               <WaveformChart data={history?.ecg} color="var(--accent-success)" yMin={-100} yMax={100} />
+               <WaveformChart data={history?.ecg} color="#d32f2f" showGrid={true} />
             </div>
           </div>
           <div className="waveform-box">

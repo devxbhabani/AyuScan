@@ -51,15 +51,15 @@
 // baud rate (already done below) or set this to 0.
 #define SERIAL_PLOT_ECG   1
 
-const char* WIFI_SSID = "bhabani";
+const char* WIFI_SSID = "Bhabani-Laptop";
 const char* WIFI_PASS = "bsj898909";
 
-IPAddress   SERVER_IP(192, 168, 0, 117);  // <-- your Raspberry Pi / PC IP
+IPAddress   SERVER_IP(192, 168, 137, 1);  // <-- your Raspberry Pi / PC IP
 const uint16_t SERVER_PORT = 5005;
 
 // ================== PIN CONFIG ==================
-#define I2C_SDA      4
-#define I2C_SCL      5
+#define I2C_SDA      22
+#define I2C_SCL      23
 #define EXG_PIN      0          // BioAmp EXG Pill OUT (ADC-capable pin)
 
 #define TCA_ADDR     0x70
@@ -296,7 +296,8 @@ void sendPPGPacket() {
 
   udp.beginPacket(SERVER_IP, SERVER_PORT);
   udp.print(msg);
-  udp.endPacket();
+  int result = udp.endPacket();
+  Serial.printf("[UDP] PPG packet send result: %d (1=success, 0=fail)\n", result);
 }
 
 void sendECGPacket() {
@@ -319,7 +320,7 @@ void sendECGPacket() {
 void setup() {
   // Higher baud rate matters here since we're printing every ECG
   // sample (250/sec) as well as WiFi/UDP status. 115200 can lag.
-  Serial.begin(115200);
+  Serial.begin(921600);
   delay(300);
 
   pinMode(EXG_PIN, INPUT);
@@ -328,6 +329,8 @@ void setup() {
   Wire.setClock(400000);
 
   connectWiFi();
+  WiFi.setSleep(false);   // disable WiFi modem sleep — fixes high latency /
+                          // dropped packets common on ESP32 when idle between sends
 
   // --- init MAX30102 through the mux ---
   tcaSelect(MAX30102_CH);

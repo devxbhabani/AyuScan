@@ -3,7 +3,7 @@ import asyncio
 import websockets
 import threading
 
-UDP_IP = "0.0.0.0"
+UDP_IP = "192.168.137.1"
 UDP_PORT = 5005
 WS_PORT = 8080
 
@@ -30,9 +30,8 @@ def udp_listener(loop):
     while True:
         try:
             data, addr = sock.recvfrom(65535)
-            # Print to console for debugging, just like original
             decoded = data.decode('utf-8', errors='ignore')
-            print(f"Received from {addr}: {decoded[:100]}...")
+            print(f"[{addr[0]}:{addr[1]}] {decoded[:100]}...")
             
             # Schedule the broadcast in the async event loop
             loop.call_soon_threadsafe(lambda: asyncio.create_task(broadcast(decoded)))
