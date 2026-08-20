@@ -68,8 +68,18 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
   const timeStr = now.toLocaleTimeString();
   const dateStr = now.toLocaleDateString();
 
+  const hasWarning = device.diagnosis && device.diagnosis !== 'Normal' && device.diagnosis !== 'Unknown';
+
   return (
-    <div className={`patient-card ${isExpanded ? 'expanded' : ''} ${onClick ? 'clickable' : ''}`} onClick={onClick}>
+    <div className={`patient-card ${isExpanded ? 'expanded' : ''} ${onClick ? 'clickable' : ''} ${hasWarning ? 'has-warning' : ''}`} onClick={onClick}>
+      {hasWarning && (
+        <div className="warning-overlay">
+          <div className="warning-badge">
+            <Activity size={24} className="warning-icon pulse-animation" />
+            <span>WARNING: {device.diagnosis.toUpperCase()} DETECTED</span>
+          </div>
+        </div>
+      )}
       <div className="card-header">
         <div className="patient-info-inline">
           <span className="patient-name">{device.patientName}</span>

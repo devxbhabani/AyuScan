@@ -97,6 +97,16 @@ export function useLiveDevices() {
               };
             });
           } 
+          else if (data.type === 'diagnosis') {
+            setDevices(prevDevices => 
+              prevDevices.map(d => {
+                if (d.id === deviceId) {
+                  return { ...d, diagnosis: data.condition };
+                }
+                return d;
+              })
+            );
+          }
           else if (data.type === 'ecg') {
             // Update ECG waveform
             setHistoryData(prevHistory => {
