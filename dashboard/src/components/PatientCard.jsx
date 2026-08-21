@@ -70,15 +70,24 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
   const dateStr = now.toLocaleDateString();
 
   const hasWarning = device.diagnosis && device.diagnosis !== 'Normal' && device.diagnosis !== 'Unknown';
+  const hasSpo2Warning = device.spo2Diagnosis && device.spo2Diagnosis !== 'Stable' && device.spo2Diagnosis !== 'Unknown';
 
   return (
-    <div className={`patient-card ${isExpanded ? 'expanded' : ''} ${onClick ? 'clickable' : ''} ${hasWarning ? 'has-warning' : ''}`} onClick={onClick}>
-      {hasWarning && (
+    <div className={`patient-card ${isExpanded ? 'expanded' : ''} ${onClick ? 'clickable' : ''} ${(hasWarning || hasSpo2Warning) ? 'has-warning' : ''}`} onClick={onClick}>
+      {(hasWarning || hasSpo2Warning) && (
         <div className="warning-overlay">
-          <div className="warning-badge">
-            <Activity size={24} className="warning-icon pulse-animation" />
-            <span>WARNING: {device.diagnosis.toUpperCase()} DETECTED</span>
-          </div>
+          {hasWarning && (
+            <div className="warning-badge">
+              <Activity size={24} className="warning-icon pulse-animation" />
+              <span>WARNING: ECG {device.diagnosis.toUpperCase()} DETECTED</span>
+            </div>
+          )}
+          {hasSpo2Warning && (
+            <div className="warning-badge" style={{ marginTop: hasWarning ? '10px' : '0' }}>
+              <Droplet size={24} className="warning-icon pulse-animation" />
+              <span>WARNING: SpO2 {device.spo2Diagnosis.toUpperCase()}</span>
+            </div>
+          )}
         </div>
       )}
       <div className="card-header">
