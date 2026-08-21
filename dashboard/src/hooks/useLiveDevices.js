@@ -97,11 +97,21 @@ export function useLiveDevices() {
               };
             });
           } 
-          else if (data.type === 'diagnosis') {
+          else if (data.type === 'diagnosis' || data.type === 'ai_prediction') {
             setDevices(prevDevices => 
               prevDevices.map(d => {
                 if (d.id === deviceId) {
                   return { ...d, diagnosis: data.condition };
+                }
+                return d;
+              })
+            );
+          }
+          else if (data.type === 'spo2_warning') {
+            setDevices(prevDevices => 
+              prevDevices.map(d => {
+                if (d.id === deviceId) {
+                  return { ...d, spo2Diagnosis: data.condition };
                 }
                 return d;
               })
