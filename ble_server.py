@@ -37,22 +37,37 @@ DEVICE_NAME = "AyuScan_Node"
 
 # Add AI model path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'AI-model'))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'Spo2-Mocdel'))
 try:
     from model import ECG1DCNN
+    from train import SpO2_GRU
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load ECG Model
     ai_model = ECG1DCNN(num_classes=4).to(device)
-    model_path = os.path.join(os.path.dirname(__file__), 'backend', 'ecg_model.pth')
-    if os.path.exists(model_path):
-        ai_model.load_state_dict(torch.load(model_path, map_location=device))
+    ecg_model_path = os.path.join(os.path.dirname(__file__), 'backend', 'ecg_model.pth')
+    if os.path.exists(ecg_model_path):
+        ai_model.load_state_dict(torch.load(ecg_model_path, map_location=device))
         ai_model.eval()
-        print("AI Model loaded successfully from:", model_path)
+        print("ECG AI Model loaded successfully.")
     else:
-        print("AI Model not found at", model_path, "- waiting for training to finish.")
         ai_model = None
+
+    # Load SpO2 Model
+    spo2_model = SpO2_GRU(num_classes=4).to(device)
+    spo2_model_path = os.path.join(os.path.dirname(__file__), 'backend', 'Spo2-Mocdel', 'spo2_model.pth')
+    if os.path.exists(spo2_model_path):
+        spo2_model.load_state_dict(torch.load(spo2_model_path, map_location=device, weights_only=True))
+        spo2_model.eval()
+        print("SpO2 AI Model loaded successfully.")
+    else:
+        spo2_model = None
+
 except Exception as e:
     print("AI Model failed to initialize:", e)
     ai_model = None
+    spo2_model = None
 
 # Class names mapping
 DISEASE_CLASSES = {
@@ -62,9 +77,17 @@ DISEASE_CLASSES = {
     3: "Arrhythmia"
 }
 
+SPO2_CLASSES = {
+    0: "Stable",
+    1: "Mild Decline",
+    2: "Rapid Decline",
+    3: "Critical"
+}
+
 ecg_buffers = {}
 ppg_ir_buffer = {}
 ppg_red_buffer = {}
+spo2_history_buf = {}
 WS_PORT = 8080
 clients = set()
 
@@ -176,6 +199,38 @@ def handle_ble_notification(sender, data: bytearray):
                 with open(vitals_csv_path, 'a', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow([datetime.now().isoformat(), dev_id, spo2, round(hrv_sdnn, 1), round(hrv_rmssd, 1)])
+            # -------------------------
+            
+            # --- SpO2 AI Inference ---
+            if "spo2_model" in globals() and spo2_model is not None and spo2 > 0:
+                if dev_id not in spo2_history_buf:
+                    spo2_history_buf[dev_id] = []
+                spo2_history_buf[dev_id].append(spo2)
+                
+                # Keep sliding window of 60 seconds
+                if len(spo2_history_buf[dev_id]) > 60:
+                    spo2_history_buf[dev_id].pop(0)
+                    
+                if len(spo2_history_buf[dev_id]) == 60:
+                    raw_spo2 = np.array(spo2_history_buf[dev_id], dtype=np.float32)
+                    # Normalize identically to training
+                    norm_spo2 = (raw_spo2 - 90.0) / 10.0
+                    
+                    tensor_spo2 = torch.tensor(norm_spo2, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)
+                    with torch.no_grad():
+                        outputs = spo2_model(tensor_spo2)
+                        _, predicted = torch.max(outputs.data, 1)
+                        condition_idx = predicted.item()
+                        
+                    if condition_idx > 0:
+                        condition = SPO2_CLASSES.get(condition_idx, "Unknown")
+                        print(f"[AI] SpO2 deterioration detected: {condition}")
+                        warning_msg = json.dumps({
+                            "device": dev_id,
+                            "type": "spo2_warning",
+                            "condition": condition
+                        })
+                        asyncio.create_task(broadcast(warning_msg))
             # -------------------------
             
             # Always broadcast processed vitals so dashboard updates
