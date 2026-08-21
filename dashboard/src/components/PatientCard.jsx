@@ -9,14 +9,14 @@ const WaveformChart = ({ data, color, yMin, yMax, showGrid }) => {
   const width = 300; // SVG viewBox width
   const height = 100; // SVG viewBox height
   
-  const minX = data[0].x;
-  const maxX = data[data.length - 1].x;
+  const minX = 0;
+  const maxX = data.length > 1 ? data.length - 1 : 1;
   
   let currentYMin = yMin;
   let currentYMax = yMax;
 
   if (currentYMin === undefined || currentYMax === undefined) {
-    const yValues = data.map(d => d.y);
+    const yValues = data.map(d => typeof d === 'object' ? d.y : d);
     currentYMin = currentYMin !== undefined ? currentYMin : Math.min(...yValues);
     currentYMax = currentYMax !== undefined ? currentYMax : Math.max(...yValues);
     const padding = (currentYMax - currentYMin) * 0.1 || 10;
@@ -24,10 +24,11 @@ const WaveformChart = ({ data, color, yMin, yMax, showGrid }) => {
     currentYMax += padding;
   }
   
-  const points = data.map(d => {
-    const normX = ((d.x - minX) / (maxX - minX)) * width;
+  const points = data.map((d, index) => {
+    const yVal = typeof d === 'object' ? d.y : d;
+    const normX = ((index - minX) / (maxX - minX)) * width;
     // Invert Y because SVG coordinates go down
-    const normY = height - (((d.y - currentYMin) / (currentYMax - currentYMin)) * height);
+    const normY = height - (((yVal - currentYMin) / (currentYMax - currentYMin)) * height);
     return `${normX},${normY}`;
   }).join(' ');
 

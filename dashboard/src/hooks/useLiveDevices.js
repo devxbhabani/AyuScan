@@ -107,17 +107,33 @@ export function useLiveDevices() {
               })
             );
           }
+          else if (data.type === 'temp') {
+            setDevices(prevDevices => 
+              prevDevices.map(d => {
+                if (d.id === deviceId) {
+                  return {
+                    ...d,
+                    vitals: {
+                      ...d.vitals,
+                      temp: Number(data.val).toFixed(1)
+                    }
+                  };
+                }
+                return d;
+              })
+            );
+          }
           else if (data.type === 'ecg') {
             // Update ECG waveform
             setHistoryData(prevHistory => {
               const currentDeviceHistory = prevHistory[deviceId] || { ecg: [], spo2: [] };
               
-              // data.data contains an array of points
-              const newPoints = data.data.map((val, idx) => ({ x: Date.now() + idx, y: val }));
+              // data.data contains an array of points (raw numbers)
+              const newPoints = data.data;
               const newEcg = [...currentDeviceHistory.ecg, ...newPoints];
               
-              // Keep a sliding window of points (e.g. last 100 points)
-              if (newEcg.length > 100) newEcg.splice(0, newEcg.length - 100);
+              // Keep a sliding window of 750 points (3 seconds at 250Hz sampling rate)
+              if (newEcg.length > 750) newEcg.splice(0, newEcg.length - 750);
               
               return {
                 ...prevHistory,

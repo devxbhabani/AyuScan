@@ -34,8 +34,10 @@
 */
 
 #include <Wire.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include "MAX30105.h"          // SparkFun lib, works for MAX30102
 #include "heartRate.h"         // beat detection (for RR intervals / HRV)
 #include "spo2_algorithm.h"    // Maxim SpO2 + HR algorithm
@@ -51,11 +53,27 @@
 // baud rate (already done below) or set this to 0.
 #define SERIAL_PLOT_ECG   1
 
-const char* WIFI_SSID = "Bhabani-Laptop";
-const char* WIFI_PASS = "bsj898909";
+// ================== BLE CONFIG ==================
+#define SERVICE_UUID           "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define ECG_CHAR_UUID          "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define VITALS_CHAR_UUID       "e3223119-9445-4e96-a4a1-85358ce291d0"
 
-IPAddress   SERVER_IP(192, 168, 137, 1);  // <-- your Raspberry Pi / PC IP
-const uint16_t SERVER_PORT = 5005;
+BLEServer* pServer = NULL;
+BLECharacteristic* pEcgCharacteristic = NULL;
+BLECharacteristic* pVitalsCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      Serial.println("BLE Client Connected");
+    };
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("BLE Client Disconnected");
+    }
+};
 
 // ================== PIN CONFIG ==================
 #define I2C_SDA      22
@@ -102,6 +120,7 @@ int32_t spo2Value = 0;
 int8_t  spo2Valid = 0;
 int32_t maximHRValue = 0;   // HR as computed by the Maxim algorithm (cross-check)
 int8_t  maximHRValid = 0;
+int32_t lastGoodSpO2 = 0;   // Hold valid readings to prevent -999 UI glitches
 
 // ---- Beat detection / RR intervals ----
 unsigned long lastBeatTime = 0;
@@ -220,44 +239,68 @@ void evaluateCycle() {
   cycleBpmCount     = 0;
 }
 
-// Called every main-loop pass (fast, non-blocking) to feed the
-// current cycle's contact/beat stats.
 void updatePPGSampling() {
   tcaSelect(MAX30102_CH);
-  long irValue = maxSensor.getIR();
-  long redValue = maxSensor.getRed();
+  maxSensor.check(); // Read from sensor FIFO
+  
+  while (maxSensor.available()) {
+    long irValue = maxSensor.getFIFOIR();
+    long redValue = maxSensor.getFIFORed();
+    maxSensor.nextSample(); // Advance to next sample
 
-  cycleTotalSamples++;
-  if (irValue > 50000) { // confirmed skin contact
-    cycleGoodContact++;
-    if (checkForBeat(irValue)) {
-      unsigned long now = millis();
-      if (lastBeatTime != 0) {
-        long delta = now - lastBeatTime;
-        if (delta > 400 && delta < 1500) { // ~40-150 bpm plausible range
-          if (cycleBpmCount < 10) {
-            cycleBpmReadings[cycleBpmCount++] = 60000.0 / delta;
+    cycleTotalSamples++;
+    if (irValue > 50000) { // confirmed skin contact
+      cycleGoodContact++;
+      if (checkForBeat(irValue)) {
+        unsigned long now = millis();
+        if (lastBeatTime != 0) {
+          long delta = now - lastBeatTime;
+          if (delta > 400 && delta < 1500) { // ~40-150 bpm plausible range
+            if (cycleBpmCount < 10) {
+              cycleBpmReadings[cycleBpmCount++] = 60000.0 / delta;
+            }
+            addRRInterval((float)delta);
+            computeHRV();
           }
-          addRRInterval((float)delta);
-          computeHRV();
         }
+        lastBeatTime = now;
       }
-      lastBeatTime = now;
     }
-  }
 
-  // feed the SpO2 block buffer at ~100Hz
-  if (millis() - lastPPGCollect >= 10) {
-    lastPPGCollect = millis();
-    irBuffer[ppgFillIdx]  = irValue;
-    redBuffer[ppgFillIdx] = redValue;
-    ppgFillIdx++;
+    // Accumulate for SpO2 (downsample 4:1 from 100Hz to 25Hz for Maxim algorithm)
+    static long irSum = 0;
+    static long redSum = 0;
+    static int downsampleCount = 0;
 
-    if (ppgFillIdx >= PPG_BUFFER_SIZE) {
-      ppgFillIdx = 0;
-      maxim_heart_rate_and_oxygen_saturation(
-        irBuffer, PPG_BUFFER_SIZE, redBuffer,
-        &spo2Value, &spo2Valid, &maximHRValue, &maximHRValid);
+    irSum += irValue;
+    redSum += redValue;
+    downsampleCount++;
+
+    if (downsampleCount >= 4) {
+      irBuffer[ppgFillIdx] = irSum / 4;
+      redBuffer[ppgFillIdx] = redSum / 4;
+      ppgFillIdx++;
+      irSum = 0;
+      redSum = 0;
+      downsampleCount = 0;
+
+      if (ppgFillIdx >= PPG_BUFFER_SIZE) {
+        maxim_heart_rate_and_oxygen_saturation(
+          irBuffer, PPG_BUFFER_SIZE, redBuffer,
+          &spo2Value, &spo2Valid, &maximHRValue, &maximHRValid);
+          
+        if (spo2Valid && spo2Value > 0 && spo2Value <= 100) {
+          lastGoodSpO2 = spo2Value;
+        }
+
+        // Shift the last 75 samples to the start of the buffer
+        for (byte i = 25; i < 100; i++) {
+          redBuffer[i - 25] = redBuffer[i];
+          irBuffer[i - 25] = irBuffer[i];
+        }
+        // Reset index to 75 so we collect 25 new samples (~1s) before calculating again
+        ppgFillIdx = 75;
+      }
     }
   }
 
@@ -268,53 +311,67 @@ void updatePPGSampling() {
   }
 }
 
-// ================== WIFI / UDP ==================
-WiFiUDP udp;
+// ================== BLE ==================
+void setupBLE() {
+  BLEDevice::init("AyuScan_Node");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
 
-void connectWiFi() {
-  Serial.print("Connecting to WiFi");
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(400);
-    Serial.print(".");
-  }
-  Serial.println();
-  Serial.print("Connected. IP: ");
-  Serial.println(WiFi.localIP());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  pEcgCharacteristic = pService->createCharacteristic(
+                      ECG_CHAR_UUID,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pEcgCharacteristic->addDescriptor(new BLE2902());
+
+  pVitalsCharacteristic = pService->createCharacteristic(
+                      VITALS_CHAR_UUID,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pVitalsCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+  Serial.println("BLE Advertising started...");
 }
 
 void sendPPGPacket() {
+  if (!deviceConnected) return;
   char msg[220];
   snprintf(msg, sizeof(msg),
     "{\"device\":\"%s\",\"type\":\"ppg\",\"bpm\":%d,\"spo2\":%d,"
     "\"hrv_sdnn\":%.1f,\"hrv_rmssd\":%.1f}",
     DEVICE_ID,
     (int)currentBPM,
-    (int)spo2Value,
+    (int)lastGoodSpO2,
     hrv_sdnn, hrv_rmssd);
 
-  udp.beginPacket(SERVER_IP, SERVER_PORT);
-  udp.print(msg);
-  int result = udp.endPacket();
-  Serial.printf("[UDP] PPG packet send result: %d (1=success, 0=fail)\n", result);
+  pVitalsCharacteristic->setValue((uint8_t*)msg, strlen(msg));
+  pVitalsCharacteristic->notify();
 }
 
 void sendECGPacket() {
-  char header[80];
-  snprintf(header, sizeof(header),
-    "{\"device\":\"%s\",\"type\":\"ecg\",\"fs\":%d,\"data\":[",
-    DEVICE_ID, ECG_SAMPLE_RATE_HZ);
-
-  udp.beginPacket(SERVER_IP, SERVER_PORT);
-  udp.print(header);
+  if (!deviceConnected) return;
+  char payload[300]; 
+  int offset = snprintf(payload, sizeof(payload), "{\"device\":\"%s\",\"type\":\"ecg\",\"fs\":%d,\"data\":[", DEVICE_ID, ECG_SAMPLE_RATE_HZ);
   for (int i = 0; i < ECG_BATCH_SIZE; i++) {
-    udp.print(ecgBuffer[i]);
-    if (i < ECG_BATCH_SIZE - 1) udp.print(",");
+    offset += snprintf(payload + offset, sizeof(payload) - offset, "%d", ecgBuffer[i]);
+    if (i < ECG_BATCH_SIZE - 1) {
+      offset += snprintf(payload + offset, sizeof(payload) - offset, ",");
+    }
   }
-  udp.print("]}");
-  udp.endPacket();
+  snprintf(payload + offset, sizeof(payload) - offset, "]}");
+  
+  pEcgCharacteristic->setValue((uint8_t*)payload, strlen(payload));
+  pEcgCharacteristic->notify();
 }
+
 
 // ================== SETUP ==================
 void setup() {
@@ -328,9 +385,7 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
 
-  connectWiFi();
-  WiFi.setSleep(false);   // disable WiFi modem sleep — fixes high latency /
-                          // dropped packets common on ESP32 when idle between sends
+  setupBLE();
 
   // --- init MAX30102 through the mux ---
   tcaSelect(MAX30102_CH);
@@ -339,8 +394,8 @@ void setup() {
     while (1) delay(1000);
   }
   maxSensor.setup();
-  maxSensor.setPulseAmplitudeRed(0x3F);   // strong LED drive for wrist tissue
-  maxSensor.setPulseAmplitudeIR(0x3F);
+  maxSensor.setPulseAmplitudeRed(0x1F);   // strong LED drive for wrist tissue
+  maxSensor.setPulseAmplitudeIR(0x1F);
   maxSensor.setPulseAmplitudeGreen(0);
 
   cycleStart = millis();
@@ -355,6 +410,17 @@ void setup() {
 
 // ================== LOOP ==================
 void loop() {
+  // --- BLE Reconnection Logic ---
+  if (!deviceConnected && oldDeviceConnected) {
+      delay(500); 
+      pServer->startAdvertising();
+      Serial.println("BLE Client Disconnected. Restarting advertising...");
+      oldDeviceConnected = deviceConnected;
+  }
+  if (deviceConnected && !oldDeviceConnected) {
+      oldDeviceConnected = deviceConnected;
+  }
+
   // ---------- ECG: fast, timer-driven ----------
   if (ecgSampleReady) {
     ecgSampleReady = false;
