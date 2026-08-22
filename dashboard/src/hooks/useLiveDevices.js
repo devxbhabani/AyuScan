@@ -133,6 +133,24 @@ export function useLiveDevices() {
               })
             );
           }
+          else if (data.type === 'bp') {
+            setDevices(prevDevices => 
+              prevDevices.map(d => {
+                if (d.id === deviceId) {
+                  return {
+                    ...d,
+                    vitals: {
+                      ...d.vitals,
+                      sys: data.sbp,
+                      dia: data.dbp
+                    },
+                    bpStatus: data.status
+                  };
+                }
+                return d;
+              })
+            );
+          }
           else if (data.type === 'ecg') {
             // Update ECG waveform
             setHistoryData(prevHistory => {

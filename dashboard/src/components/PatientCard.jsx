@@ -71,10 +71,11 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
 
   const hasWarning = device.diagnosis && device.diagnosis !== 'Normal' && device.diagnosis !== 'Unknown';
   const hasSpo2Warning = device.spo2Diagnosis && device.spo2Diagnosis !== 'Stable' && device.spo2Diagnosis !== 'Unknown';
+  const hasBpWarning = device.bpStatus && (device.bpStatus === 'Crisis' || device.bpStatus === 'Hypertension Stage 2');
 
   return (
-    <div className={`patient-card ${isExpanded ? 'expanded' : ''} ${onClick ? 'clickable' : ''} ${(hasWarning || hasSpo2Warning) ? 'has-warning' : ''}`} onClick={onClick}>
-      {(hasWarning || hasSpo2Warning) && (
+    <div className={`patient-card ${isExpanded ? 'expanded' : ''} ${onClick ? 'clickable' : ''} ${(hasWarning || hasSpo2Warning || hasBpWarning) ? 'has-warning' : ''}`} onClick={onClick}>
+      {(hasWarning || hasSpo2Warning || hasBpWarning) && (
         <div className="warning-overlay">
           {hasWarning && (
             <div className="warning-badge">
@@ -86,6 +87,12 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
             <div className="warning-badge" style={{ marginTop: hasWarning ? '10px' : '0' }}>
               <Droplet size={24} className="warning-icon pulse-animation" />
               <span>WARNING: SpO2 {device.spo2Diagnosis.toUpperCase()}</span>
+            </div>
+          )}
+          {hasBpWarning && (
+            <div className="warning-badge" style={{ marginTop: (hasWarning || hasSpo2Warning) ? '10px' : '0' }}>
+              <Activity size={24} className="warning-icon pulse-animation" />
+              <span>WARNING: BP {device.bpStatus.toUpperCase()}</span>
             </div>
           )}
         </div>
@@ -122,6 +129,11 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
             <div className="metric-value">
               {device.vitals.sys}/{device.vitals.dia}
             </div>
+            {device.bpStatus && (
+              <div className="bp-status" style={{ fontSize: '0.75rem', marginTop: '4px', color: (device.bpStatus === 'Normal' ? '#4CAF50' : '#FF9800') }}>
+                {device.bpStatus}
+              </div>
+            )}
           </div>
           
           <div className="metric-box spo2">

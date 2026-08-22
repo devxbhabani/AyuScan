@@ -38,9 +38,12 @@ DEVICE_NAME = "AyuScan_Node"
 # Add AI model path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'AI-model'))
 sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'Spo2-Mocdel'))
+sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'Bp-model'))
+
 try:
     from model import ECG1DCNN
     from train import SpO2_GRU
+    from bp_model.predictor import predict_bp
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -189,6 +192,33 @@ def handle_ble_notification(sender, data: bytearray):
             processor = ppg_processors[dev_id]
             ir_array = payload.get("ir", [])
             red_array = payload.get("red", [])
+            
+            # --- Buffer PPG for BP Inference ---
+            if dev_id not in ppg_ir_buffer:
+                ppg_ir_buffer[dev_id] = []
+            ppg_ir_buffer[dev_id].extend(ir_array)
+            
+            if len(ppg_ir_buffer[dev_id]) > 500:
+                ppg_ir_buffer[dev_id] = ppg_ir_buffer[dev_id][-500:]
+                
+            if len(ecg_buffers.get(dev_id, [])) >= 500 and len(ppg_ir_buffer[dev_id]) == 500:
+                ecg_win = ecg_buffers[dev_id][-500:]
+                ppg_win = ppg_ir_buffer[dev_id]
+                
+                try:
+                    bp_result = predict_bp(ecg_win, ppg_win, fs=100)
+                    if bp_result is not None:
+                        bp_msg = json.dumps({
+                            "device": dev_id,
+                            "type": "bp",
+                            "sbp": bp_result["sbp"],
+                            "dbp": bp_result["dbp"],
+                            "status": bp_result["status"]
+                        })
+                        asyncio.create_task(broadcast(bp_msg))
+                except Exception as e:
+                    pass
+            # -----------------------------------
             
             bpm, spo2, hrv_sdnn, hrv_rmssd = processor.process_samples(ir_array, red_array)
             
