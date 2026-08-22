@@ -1,11 +1,3 @@
-# Ignore datasets and large files
-backend/Bp-model/dataset/
-backend/Bp-model/extracted_features.csv
-backend/Bp-model/bp_model/*.pkl
 backend/Bp-model/bp_model/__pycache__/
 backend/Bp-model/__pycache__/
-dataset/
-datasets/
 __pycache__/
-*.pkl
-*.csv
