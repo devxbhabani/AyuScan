@@ -1,197 +1,186 @@
 import time
 import math
 import numpy as np
+from scipy.signal import butter, filtfilt, find_peaks
 
 class PPGProcessor:
     def __init__(self, fs=100):
         self.fs = fs
-        self.bpm_history = []
-        self.bpm_history_size = 4
-        self.rr_intervals = []
-        self.rr_history_len = 30
-        
         self.current_bpm = 0
         self.last_good_bpm = 0
+        self.bpm_history = []
+        self.bpm_history_size = 8
         self.cycles_since_good_contact = 0
-        self.max_hold_cycles = 10 # hold for 10 evaluation cycles if finger shifts
-        
+        self.max_hold_cycles = 10
+
         self.hrv_sdnn = 0.0
         self.hrv_rmssd = 0.0
-        
-        # Buffers for Maxim SpO2 (100 samples at 25Hz effective rate)
+        self.rr_intervals = []
+        self.rr_history_len = 30
+
+        # Rolling IR buffer for peak-based BPM detection (5 seconds @ 100Hz)
+        self.ir_buffer = []
+        self.IR_BUFFER_SIZE = 500
+
+        # Buffers for SpO2 calculation
         self.spo2_ir_buffer = []
         self.spo2_red_buffer = []
         self.spo2_sample_counter = 0
         self.last_spo2 = 0
-        
-        # Beat detection state
-        self.last_beat_time = 0
-        self.ir_avg = 0
-        
+
+        # SpO2 smoothing
+        self.spo2_history = []
+        self.spo2_history_size = 8
+        self.spo2_ema = 0.0
+        self.spo2_ema_alpha = 0.2
+        self.MIN_IR_STRENGTH = 30000
+        self.MIN_AC_RATIO = 0.001
+
         # Cycle evaluation
         self.cycle_total_samples = 0
         self.cycle_good_contact = 0
-        self.cycle_bpm_readings = []
-        
-        # State machine for peak detection (SparkFun PBA Algorithm)
-        self.IR_AC_Max = 20
-        self.IR_AC_Min = -20
-        self.IR_AC_Signal_Current = 0
-        self.IR_AC_Signal_Previous = 0
-        self.IR_AC_Signal_min = 0
-        self.IR_AC_Signal_max = 0
-        self.IR_Average_Estimated = 0
-        
-        self.positiveEdge = 0
-        self.negativeEdge = 0
-        self.ir_avg_reg = 0.0
-        
-        self.cbuf = [0] * 32
-        self.offset = 0
-        self.FIRCoeffs = [172, 321, 579, 927, 1360, 1858, 2390, 2916, 3391, 3768, 4012, 4096]
-        
-    def add_rr_interval(self, rr_ms):
-        if rr_ms < 300 or rr_ms > 2000:
-            return
-            
-        self.rr_intervals.append(rr_ms)
+
+    # ---- HRV ----
+    def _update_rr(self, rr_intervals_sec):
+        """Update RR intervals and recompute HRV metrics."""
+        rr_ms = [r * 1000 for r in rr_intervals_sec if 500 < r * 1000 < 1200]
+        self.rr_intervals.extend(rr_ms)
         if len(self.rr_intervals) > self.rr_history_len:
-            self.rr_intervals.pop(0)
-            
+            self.rr_intervals = self.rr_intervals[-self.rr_history_len:]
         self._compute_hrv()
-        
+
     def _compute_hrv(self):
         if len(self.rr_intervals) < 3:
-            self.hrv_sdnn = 0
-            self.hrv_rmssd = 0
+            self.hrv_sdnn = 0.0
+            self.hrv_rmssd = 0.0
             return
-            
-        # SDNN
         mean_rr = np.mean(self.rr_intervals)
-        sum_sq_diff = sum((rr - mean_rr)**2 for rr in self.rr_intervals)
-        self.hrv_sdnn = math.sqrt(sum_sq_diff / len(self.rr_intervals))
-        
-        # RMSSD
-        sum_sq_succ_diff = 0
-        pairs = 0
-        for i in range(1, len(self.rr_intervals)):
-            diff = self.rr_intervals[i] - self.rr_intervals[i - 1]
-            sum_sq_succ_diff += diff * diff
-            pairs += 1
-            
-        if pairs > 0:
-            self.hrv_rmssd = math.sqrt(sum_sq_succ_diff / pairs)
-            
+        self.hrv_sdnn = float(np.sqrt(np.mean((np.array(self.rr_intervals) - mean_rr) ** 2)))
+        diffs = np.diff(self.rr_intervals)
+        self.hrv_rmssd = float(np.sqrt(np.mean(diffs ** 2))) if len(diffs) > 0 else 0.0
+
+    # ---- BPM via scipy find_peaks ----
+    def _compute_bpm_from_buffer(self):
+        """
+        Bandpass-filter the last 5s of IR, then use find_peaks to find
+        systolic peaks and compute BPM from median inter-peak interval.
+        Much more robust than the FIR zero-crossing port for bursty FIFO data.
+        """
+        if len(self.ir_buffer) < self.IR_BUFFER_SIZE:
+            return 0, []
+
+        ir = np.array(self.ir_buffer[-self.IR_BUFFER_SIZE:], dtype=np.float64)
+
+        # Gate: require DC level indicating finger contact
+        if np.mean(ir) < self.MIN_IR_STRENGTH:
+            return 0, []
+
+        # Bandpass 0.75–2.5 Hz  (45–150 bpm) - narrower to reject harmonics
+        nyq = 0.5 * self.fs
+        b, a = butter(2, [0.75 / nyq, 2.5 / nyq], btype='band')
+        filtered = filtfilt(b, a, ir)
+
+        # min_dist = 0.5s → max 120 bpm (increased from 0.4s to skip dicrotic notch)
+        # width = min 8 samples (80ms) → rejects narrow dicrotic notch peaks
+        # prominence = 0.3*std → rejects small noise peaks
+        min_dist = int(0.5 * self.fs)
+        peaks, _ = find_peaks(
+            filtered,
+            distance=min_dist,
+            prominence=0.3 * np.std(filtered),
+            width=int(0.08 * self.fs)   # systolic peaks are wide (~200ms); dicrotic is narrow
+        )
+
+        if len(peaks) < 2:
+            return 0, []
+
+        # Inter-peak intervals in seconds
+        rr = np.diff(peaks) / self.fs
+        # Accept only physiological range (50–120 bpm = 0.5–1.2s)
+        valid_rr = rr[(rr >= 0.5) & (rr <= 1.2)]
+
+        if len(valid_rr) == 0:
+            return 0, []
+
+        bpm = 60.0 / np.median(valid_rr)
+
+        # Diagnostic: show exactly what peaks were found
+        rr_bpms = [round(60.0 / r, 1) for r in valid_rr]
+        print(f"[BPM Debug] peaks_found={len(peaks)}, intervals_bpm={rr_bpms}, result={bpm:.1f}")
+
+        return float(bpm), list(valid_rr)
+
     def _smooth_bpm(self, new_bpm):
         if new_bpm <= 0:
             return -1
-            
         self.bpm_history.append(new_bpm)
         if len(self.bpm_history) > self.bpm_history_size:
             self.bpm_history.pop(0)
-            
-        return sum(self.bpm_history) / len(self.bpm_history)
-        
-    def _average_dc_estimator(self, sample):
-        self.ir_avg_reg += (sample - self.ir_avg_reg) / 16.0
-        return int(self.ir_avg_reg)
-        
-    def _low_pass_fir_filter(self, din):
-        self.cbuf[self.offset] = din
-        
-        z = self.FIRCoeffs[11] * self.cbuf[(self.offset - 11) & 0x1F]
-        for i in range(11):
-            z += self.FIRCoeffs[i] * (self.cbuf[(self.offset - i) & 0x1F] + self.cbuf[(self.offset - 22 + i) & 0x1F])
-            
-        self.offset += 1
-        self.offset %= 32
-        
-        return z >> 15
-        
-    def _check_for_beat(self, sample):
-        # Exact port of SparkFun MAX30105 heartRate.cpp
-        beat_detected = False
-        
-        self.IR_AC_Signal_Previous = self.IR_AC_Signal_Current
-        self.IR_Average_Estimated = self._average_dc_estimator(sample)
-        self.IR_AC_Signal_Current = self._low_pass_fir_filter(sample - self.IR_Average_Estimated)
-        
-        # Detect positive zero crossing (rising edge)
-        if (self.IR_AC_Signal_Previous < 0) and (self.IR_AC_Signal_Current >= 0):
-            self.IR_AC_Max = self.IR_AC_Signal_max
-            self.IR_AC_Min = self.IR_AC_Signal_min
-            
-            self.positiveEdge = 1
-            self.negativeEdge = 0
-            self.IR_AC_Signal_max = 0
-            
-            ac_diff = self.IR_AC_Max - self.IR_AC_Min
-            if 20 < ac_diff < 1000:
-                beat_detected = True
-                
-        # Detect negative zero crossing (falling edge)
-        if (self.IR_AC_Signal_Previous > 0) and (self.IR_AC_Signal_Current <= 0):
-            self.positiveEdge = 0
-            self.negativeEdge = 1
-            self.IR_AC_Signal_min = 0
-            
-        # Find Maximum value in positive cycle
-        if self.positiveEdge and (self.IR_AC_Signal_Current > self.IR_AC_Signal_Previous):
-            self.IR_AC_Signal_max = self.IR_AC_Signal_Current
-            
-        # Find Minimum value in negative cycle
-        if self.negativeEdge and (self.IR_AC_Signal_Current < self.IR_AC_Signal_Previous):
-            self.IR_AC_Signal_min = self.IR_AC_Signal_Current
-                
-        return beat_detected
+        return float(np.mean(self.bpm_history))
 
+    # ---- SpO2 ----
     def _maxim_spo2(self):
         if len(self.spo2_ir_buffer) < 100 or len(self.spo2_red_buffer) < 100:
             return self.last_spo2
-            
-        ir_data = np.array(self.spo2_ir_buffer[-100:], dtype=np.float64)
+
+        ir_data  = np.array(self.spo2_ir_buffer[-100:], dtype=np.float64)
         red_data = np.array(self.spo2_red_buffer[-100:], dtype=np.float64)
-        
-        ir_dc = np.mean(ir_data)
+
+        ir_dc  = np.mean(ir_data)
         red_dc = np.mean(red_data)
-        
-        if ir_dc < 10000 or red_dc < 10000:
+
+        if ir_dc < self.MIN_IR_STRENGTH or red_dc < 10000:
             return self.last_spo2
-            
-        ir_ac = ir_data - ir_dc
+
+        ir_ac  = ir_data  - ir_dc
         red_ac = red_data - red_dc
-        
-        ir_rms = np.sqrt(np.mean(ir_ac**2))
-        red_rms = np.sqrt(np.mean(red_ac**2))
-        
+
+        ir_rms  = np.sqrt(np.mean(ir_ac  ** 2))
+        red_rms = np.sqrt(np.mean(red_ac ** 2))
+
+        if ir_rms / ir_dc < self.MIN_AC_RATIO:
+            return self.last_spo2
+
         if ir_rms > 0:
-            ratio = (red_rms / red_dc) / (ir_rms / ir_dc)
-            spo2 = -45.060 * (ratio**2) + 30.354 * ratio + 94.845
-            
-            if 0 <= spo2 <= 100:
-                self.last_spo2 = int(spo2)
-                
+            ratio    = (red_rms / red_dc) / (ir_rms / ir_dc)
+            spo2_raw = -45.060 * (ratio ** 2) + 30.354 * ratio + 94.845
+
+            if 85 <= spo2_raw <= 100:
+                if len(self.spo2_history) >= 3:
+                    median_val = sorted(self.spo2_history)[len(self.spo2_history) // 2]
+                    if abs(spo2_raw - median_val) > 6:
+                        return self.last_spo2
+
+                if self.spo2_ema == 0.0:
+                    self.spo2_ema = spo2_raw
+                else:
+                    self.spo2_ema = (self.spo2_ema_alpha * spo2_raw
+                                     + (1 - self.spo2_ema_alpha) * self.spo2_ema)
+
+                self.spo2_history.append(spo2_raw)
+                if len(self.spo2_history) > self.spo2_history_size:
+                    self.spo2_history.pop(0)
+
+                self.last_spo2 = int(round(self.spo2_ema))
+
         return self.last_spo2
 
+    # ---- Main entry point ----
     def process_samples(self, ir_array, red_array):
-        for i in range(len(ir_array)):
-            ir_val = ir_array[i]
-            red_val = red_array[i]
-            
+        if not ir_array:
+            return self.current_bpm, self.last_spo2, self.hrv_sdnn, self.hrv_rmssd
+
+        for i, (ir_val, red_val) in enumerate(zip(ir_array, red_array)):
             self.cycle_total_samples += 1
-            if ir_val > 50000:
+            if ir_val > self.MIN_IR_STRENGTH:
                 self.cycle_good_contact += 1
-                
-                if self._check_for_beat(ir_val):
-                    now = int(time.time() * 1000)
-                    if self.last_beat_time != 0:
-                        delta = now - self.last_beat_time
-                        if 400 < delta < 1500:
-                            if len(self.cycle_bpm_readings) < 10:
-                                self.cycle_bpm_readings.append(60000.0 / delta)
-                            self.add_rr_interval(float(delta))
-                    self.last_beat_time = now
-            
+
+            # Accumulate rolling IR buffer for BPM
+            self.ir_buffer.append(ir_val)
+            if len(self.ir_buffer) > self.IR_BUFFER_SIZE:
+                self.ir_buffer.pop(0)
+
+            # Downsample 4:1 for SpO2 (25 Hz effective)
             if self.spo2_sample_counter % 4 == 0:
                 self.spo2_ir_buffer.append(ir_val)
                 self.spo2_red_buffer.append(red_val)
@@ -199,42 +188,49 @@ class PPGProcessor:
                     self.spo2_ir_buffer.pop(0)
                     self.spo2_red_buffer.pop(0)
             self.spo2_sample_counter += 1
-            
+
         spo2 = self._maxim_spo2()
-        
-        # Evaluate cycle every 250 samples (2.5 seconds)
+
+        # Evaluate BPM every 250 samples (2.5 s)
         if self.cycle_total_samples >= 250:
-            self.evaluate_cycle()
-            
+            self._evaluate_cycle()
+
         return self.current_bpm, spo2, self.hrv_sdnn, self.hrv_rmssd
-        
-    def evaluate_cycle(self):
-        good_contact = (self.cycle_total_samples > 0) and (self.cycle_good_contact >= int(self.cycle_total_samples * 0.7))
-        
-        raw_cycle_bpm = 0
-        if good_contact and len(self.cycle_bpm_readings) >= 2:
-            raw_cycle_bpm = sum(self.cycle_bpm_readings) / len(self.cycle_bpm_readings)
-            
+
+    def _evaluate_cycle(self):
+        good_contact = (self.cycle_total_samples > 0 and
+                        self.cycle_good_contact >= int(self.cycle_total_samples * 0.5))
+
         if not good_contact:
             self.cycles_since_good_contact += 1
         else:
             self.cycles_since_good_contact = 0
-            
-        smoothed = self._smooth_bpm(raw_cycle_bpm)
-        
-        if smoothed > 0:
-            self.current_bpm = int(smoothed)
-            self.last_good_bpm = self.current_bpm
+
+        if good_contact:
+            raw_bpm, valid_rr = self._compute_bpm_from_buffer()
+            if valid_rr:
+                self._update_rr(valid_rr)
+
+            smoothed = self._smooth_bpm(raw_bpm)
+            if smoothed > 0:
+                self.current_bpm = int(round(smoothed))
+                self.last_good_bpm = self.current_bpm
+            elif self.cycles_since_good_contact < self.max_hold_cycles:
+                self.current_bpm = self.last_good_bpm
+            else:
+                self._reset()
         elif self.cycles_since_good_contact < self.max_hold_cycles:
             self.current_bpm = self.last_good_bpm
         else:
-            self.current_bpm = 0
-            self.last_good_bpm = 0
-            self.bpm_history.clear()
-            self.rr_intervals.clear()
-            self.hrv_sdnn = 0
-            self.hrv_rmssd = 0
-            
-        self.cycle_total_samples = 0
-        self.cycle_good_contact = 0
-        self.cycle_bpm_readings.clear()
+            self._reset()
+
+        self.cycle_total_samples  = 0
+        self.cycle_good_contact   = 0
+
+    def _reset(self):
+        self.current_bpm   = 0
+        self.last_good_bpm = 0
+        self.bpm_history.clear()
+        self.rr_intervals.clear()
+        self.hrv_sdnn  = 0.0
+        self.hrv_rmssd = 0.0

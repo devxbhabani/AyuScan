@@ -96,7 +96,11 @@ SPO2_CLASSES = {
 ecg_buffers = {}
 ppg_ir_buffer = {}
 ppg_red_buffer = {}
-spo2_history_buf = {}
+spo2_history_buf = {}       # accumulates valid SpO2 readings
+spo2_last_warning = {}      # tracks last warning time per device (cooldown)
+SPO2_MIN_HISTORY    = 300   # minimum valid readings before AI runs (~5 mins at 1/sec)
+SPO2_WINDOW_SIZE    = 60    # model input window size (60 samples)
+SPO2_COOLDOWN_SECS  = 300   # minimum 5 minutes between warnings
 WS_PORT = 8080
 clients = set()
 
@@ -208,13 +212,14 @@ def handle_ble_notification(sender, data: bytearray):
             if len(ppg_ir_buffer[dev_id]) > 500:
                 ppg_ir_buffer[dev_id] = ppg_ir_buffer[dev_id][-500:]
                 
-            if len(ecg_buffers.get(dev_id, [])) >= 500 and len(ppg_ir_buffer[dev_id]) == 500:
+            if len(ecg_buffers.get(dev_id, [])) >= 500 and len(ppg_ir_buffer[dev_id]) >= 500:
                 ecg_win = ecg_buffers[dev_id][-500:]
-                ppg_win = ppg_ir_buffer[dev_id]
+                ppg_win = ppg_ir_buffer[dev_id][-500:]
                 
                 try:
                     bp_result = predict_bp(ecg_win, ppg_win, fs=100)
                     if bp_result is not None:
+                        print(f"[BP] SBP: {bp_result['sbp']}, DBP: {bp_result['dbp']}, Status: {bp_result['status']}")
                         bp_msg = json.dumps({
                             "device": dev_id,
                             "type": "bp",
@@ -223,8 +228,10 @@ def handle_ble_notification(sender, data: bytearray):
                             "status": bp_result["status"]
                         })
                         asyncio.create_task(broadcast(bp_msg))
+                    else:
+                        print(f"[BP] predict_bp returned None (bad window - not enough peaks detected)")
                 except Exception as e:
-                    pass
+                    print(f"[BP] Error: {e}")
             # -----------------------------------
             
             bpm, spo2, hrv_sdnn, hrv_rmssd = processor.process_samples(ir_array, red_array)
@@ -239,36 +246,45 @@ def handle_ble_notification(sender, data: bytearray):
             # -------------------------
             
             # --- SpO2 AI Inference ---
-            if "spo2_model" in globals() and spo2_model is not None and spo2 > 0:
+            # Only add VALID readings (85-100%) to avoid polluting the trend buffer
+            if "spo2_model" in globals() and spo2_model is not None and 85 <= spo2 <= 100:
                 if dev_id not in spo2_history_buf:
                     spo2_history_buf[dev_id] = []
                 spo2_history_buf[dev_id].append(spo2)
                 
-                # Keep sliding window of 60 seconds
-                if len(spo2_history_buf[dev_id]) > 60:
-                    spo2_history_buf[dev_id].pop(0)
+                total_valid = len(spo2_history_buf[dev_id])
+                
+                # Only run AI after collecting enough history AND cooldown has passed
+                if total_valid >= SPO2_MIN_HISTORY:
+                    last_warn_time = spo2_last_warning.get(dev_id, 0)
+                    now_ts = time.time()
                     
-                if len(spo2_history_buf[dev_id]) == 60:
-                    raw_spo2 = np.array(spo2_history_buf[dev_id], dtype=np.float32)
-                    # Normalize identically to training
-                    norm_spo2 = (raw_spo2 - 90.0) / 10.0
-                    
-                    tensor_spo2 = torch.tensor(norm_spo2, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)
-                    with torch.no_grad():
-                        outputs = spo2_model(tensor_spo2)
-                        _, predicted = torch.max(outputs.data, 1)
-                        condition_idx = predicted.item()
+                    if now_ts - last_warn_time >= SPO2_COOLDOWN_SECS:
+                        # Take the most recent 60 valid readings for the model
+                        recent = spo2_history_buf[dev_id][-SPO2_WINDOW_SIZE:]
+                        raw_spo2 = np.array(recent, dtype=np.float32)
+                        norm_spo2 = (raw_spo2 - 90.0) / 10.0
                         
-                    if condition_idx > 0:
-                        condition = SPO2_CLASSES.get(condition_idx, "Unknown")
-                        print(f"[AI] SpO2 deterioration detected: {condition}")
-                        warning_msg = json.dumps({
-                            "device": dev_id,
-                            "type": "spo2_warning",
-                            "condition": condition
-                        })
-                        asyncio.create_task(broadcast(warning_msg))
+                        tensor_spo2 = torch.tensor(norm_spo2, dtype=torch.float32).unsqueeze(0).unsqueeze(-1).to(device)
+                        with torch.no_grad():
+                            outputs = spo2_model(tensor_spo2)
+                            _, predicted = torch.max(outputs.data, 1)
+                            condition_idx = predicted.item()
+                            
+                        if condition_idx > 0:
+                            condition = SPO2_CLASSES.get(condition_idx, "Unknown")
+                            print(f"[AI] SpO2 trend warning after {total_valid} readings: {condition}")
+                            spo2_last_warning[dev_id] = now_ts
+                            warning_msg = json.dumps({
+                                "device": dev_id,
+                                "type": "spo2_warning",
+                                "condition": condition
+                            })
+                            asyncio.create_task(broadcast(warning_msg))
+                else:
+                    print(f"[SpO2 AI] Collecting history: {total_valid}/{SPO2_MIN_HISTORY} valid readings")
             # -------------------------
+
             
             # Always broadcast processed vitals so dashboard updates
             summary = {

@@ -21,7 +21,7 @@
 // --- BLE UUIDs ---
 #define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define ECG_CHAR_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26a8"
-#define PPG_RAW_CHAR_UUID   "e3223119-9445-4e96-a4a1-85358ce291d0" 
+#define PPG_RAW_CHAR_UUID   "e3223119-9445-4e96-a4a1-85358ce291d0"
 
 BLEServer* pServer = NULL;
 BLECharacteristic* pEcgCharacteristic = NULL;
@@ -32,6 +32,7 @@ bool oldDeviceConnected = false;
 // --- Sensors ---
 MAX30105 maxSensor;
 Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+bool mlxAvailable = false; // set true only if MLX found at startup (Hydrocheck pattern)
 
 // --- ECG Buffering (250 Hz) ---
 #define ECG_SAMPLE_RATE_HZ 250
@@ -125,32 +126,37 @@ void setup() {
   // --- init MAX30102 ---
   tcaSelect(MAX30102_CH);
   Serial.println("TCA selected");
-  
+
   if (!maxSensor.begin(Wire, I2C_SPEED_FAST)) {
     Serial.println("MAX30102 not found.");
     while (1) delay(1000);
   }
   Serial.println("MAX30102 found");
-  
-  maxSensor.setup(); 
-  maxSensor.setPulseAmplitudeRed(0x3F); 
+
+  maxSensor.setup();
+  maxSensor.setPulseAmplitudeRed(0x3F);
   maxSensor.setPulseAmplitudeIR(0x3F);
   maxSensor.setPulseAmplitudeGreen(0);
   Serial.println("MAX30102 configured");
 
-  // --- init MLX90614 ---
+  // --- init MLX90614 (Hydrocheck pattern: tcaSelect -> begin -> flag) ---
   tcaSelect(MLX90614_CH);
-  Serial.println("TCA selected for MLX90614");
-  if (!mlx.begin()) {
-    Serial.println("MLX90614 not found. Check wiring!");
+  Wire.setClock(100000); // MLX90614 (SMBus/PEC) is unreliable above 100kHz
+  if (mlx.begin()) {
+    Serial.println("MLX90614 OK");
+    mlxAvailable = true;
   } else {
-    Serial.println("MLX90614 found and configured");
+    Serial.println("MLX90614 NOT FOUND - temperature disabled");
+    mlxAvailable = false;
   }
+  Wire.setClock(400000); // restore fast clock for MAX30102
+  // Always switch back to MAX30102 after touching the mux
+  tcaSelect(MAX30102_CH);
 
   // --- ECG timer (250 Hz) ---
-  ecgTimer = timerBegin(1000000); 
+  ecgTimer = timerBegin(1000000);
   timerAttachInterrupt(ecgTimer, &onTimer);
-  timerAlarm(ecgTimer, 4000, true, 0); 
+  timerAlarm(ecgTimer, 4000, true, 0);
   Serial.println("Timer configured");
 
   Serial.println("Setup complete.");
@@ -159,8 +165,8 @@ void setup() {
 // ================== DATA SENDER ==================
 void sendECGPacket() {
   if (!deviceConnected) return;
-  
-  char payload[300]; 
+
+  char payload[300];
   int offset = snprintf(payload, sizeof(payload), "{\"device\":\"%s\",\"type\":\"ecg\",\"fs\":%d,\"data\":[", DEVICE_ID, ECG_SAMPLE_RATE_HZ);
   for (int i = 0; i < ECG_BATCH_SIZE; i++) {
     offset += snprintf(payload + offset, sizeof(payload) - offset, "%d", ecgBuffer[i]);
@@ -169,15 +175,15 @@ void sendECGPacket() {
     }
   }
   snprintf(payload + offset, sizeof(payload) - offset, "]}");
-  
+
   pEcgCharacteristic->setValue((uint8_t*)payload, strlen(payload));
   pEcgCharacteristic->notify();
 }
 
 void sendPPGPacket() {
   if (!deviceConnected) return;
-  
-  char payload[600]; 
+
+  char payload[600];
   int offset = snprintf(payload, sizeof(payload), "{\"device\":\"%s\",\"type\":\"ppg_raw\",\"fs\":%d,\"red\":[", DEVICE_ID, PPG_SAMPLE_RATE_HZ);
   for (int i = 0; i < PPG_BATCH_SIZE; i++) {
     offset += snprintf(payload + offset, sizeof(payload) - offset, "%lu", redBuffer[i]);
@@ -189,35 +195,52 @@ void sendPPGPacket() {
     if (i < PPG_BATCH_SIZE - 1) offset += snprintf(payload + offset, sizeof(payload) - offset, ",");
   }
   snprintf(payload + offset, sizeof(payload) - offset, "]}");
-  
+
   pPpgCharacteristic->setValue((uint8_t*)payload, strlen(payload));
   pPpgCharacteristic->notify();
 }
 
 // ================== LOOP ==================
 void loop() {
-  // --- Read Temperature (1Hz) ---
+  // --- Read Temperature 1Hz ---
+  // FIX: reading + Serial printing now happens regardless of BLE
+  // connection state. Only the BLE *notify* is gated behind
+  // deviceConnected. Previously the whole block (including the
+  // Serial.printf) was gated behind deviceConnected, so if no BLE
+  // client was connected you'd never see any [Temp] output at all,
+  // even if the sensor itself was working fine.
   static unsigned long tempLastRead = 0;
   unsigned long currentMillis = millis();
   if (currentMillis - tempLastRead >= 1000) {
     tempLastRead = currentMillis;
-    if (deviceConnected && pPpgCharacteristic != NULL) {
+    if (mlxAvailable) {
       tcaSelect(MLX90614_CH);
-      float objTemp = mlx.readObjectTempC();
-      
-      // Ensure we switch back to MAX30102 after reading temperature!
-      tcaSelect(MAX30102_CH);
-      
-      char payload[100];
-      snprintf(payload, sizeof(payload), "{\"device\":\"%s\",\"type\":\"temp\",\"val\":%.2f}", DEVICE_ID, objTemp);
-      
-      pPpgCharacteristic->setValue((uint8_t*)payload, strlen(payload));
-      pPpgCharacteristic->notify();
+      Wire.setClock(100000);   // MLX90614 (SMBus/PEC) is unreliable above 100kHz
+      float objTemp  = mlx.readObjectTempC();
+      float ambTemp  = mlx.readAmbientTempC();
+      Wire.setClock(400000);   // restore fast clock for MAX30102
+      tcaSelect(MAX30102_CH); // switch back immediately (Hydrocheck pattern)
+
+      // Always print, regardless of BLE connection state
+      Serial.printf("[Temp] Object: %.2fC  Ambient: %.2fC\n", objTemp, ambTemp);
+
+      // Only notify over BLE if a client is actually connected
+      if (deviceConnected && pPpgCharacteristic != NULL) {
+        char payload[120];
+        snprintf(payload, sizeof(payload),
+          "{\"device\":\"%s\",\"type\":\"temp\",\"val\":%.2f,\"ambient\":%.2f}",
+          DEVICE_ID, objTemp, ambTemp);
+        pPpgCharacteristic->setValue((uint8_t*)payload, strlen(payload));
+        pPpgCharacteristic->notify();
+      }
+    } else {
+      Serial.println("[Temp] MLX90614 not available (mlxAvailable=false)");
     }
   }
+
   // --- BLE Reconnection Logic ---
   if (!deviceConnected && oldDeviceConnected) {
-      delay(500); 
+      delay(500);
       pServer->startAdvertising();
       Serial.println("BLE Client Disconnected. Restarting advertising...");
       oldDeviceConnected = deviceConnected;
@@ -231,7 +254,7 @@ void loop() {
     portENTER_CRITICAL(&timerMux);
     ecgSampleReady = false;
     portEXIT_CRITICAL(&timerMux);
-    
+
     ecgBuffer[ecgIndex++] = analogRead(EXG_PIN);
     if (ecgIndex >= ECG_BATCH_SIZE) {
       sendECGPacket();
@@ -246,7 +269,7 @@ void loop() {
     irBuffer[ppgIndex] = maxSensor.getFIFOIR();
     redBuffer[ppgIndex] = maxSensor.getFIFORed();
     maxSensor.nextSample();
-    
+
     ppgIndex++;
     if (ppgIndex >= PPG_BATCH_SIZE) {
       sendPPGPacket();
