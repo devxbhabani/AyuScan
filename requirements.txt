@@ -1,0 +1,28 @@
+# AyuScan Python Requirements
+# Install with: pip install -r requirements.txt
+
+# BLE Communication
+bleak==0.21.1
+
+# WebSocket Server
+websockets==12.0
+
+# Deep Learning (ECG & SpO2 AI models)
+torch==2.3.0
+
+# Data Processing
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.13.0
+
+# Machine Learning (BP model)
+xgboost==2.0.3
+scikit-learn==1.5.0
+joblib==1.4.2
+
+# Dataset handling
+wfdb==4.1.2
+vitaldb==1.4.20
+
+# Training utilities
+tqdm==4.66.4
