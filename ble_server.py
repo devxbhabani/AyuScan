@@ -42,7 +42,13 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'Bp-model'))
 
 try:
     from model import ECG1DCNN
+    
+    # Temporarily remove AI-model from path to load SpO2_GRU correctly
+    sys.path.remove(os.path.join(os.path.dirname(__file__), 'backend', 'AI-model'))
     from train import SpO2_GRU
+    # Put it back
+    sys.path.append(os.path.join(os.path.dirname(__file__), 'backend', 'AI-model'))
+    
     from bp_model.predictor import predict_bp
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -109,7 +115,8 @@ async def broadcast(message):
 def handle_ble_notification(sender, data: bytearray):
     global ai_model
     try:
-        decoded = data.decode('utf-8', errors='ignore')
+        # Arduino might send 'nan' for temperature if sensor is disconnected
+        decoded = data.decode('utf-8', errors='ignore').replace(':nan', ':null')
         
         # Broadcast raw data to dashboard
         loop = asyncio.get_running_loop()
@@ -277,12 +284,30 @@ def handle_ble_notification(sender, data: bytearray):
         elif payload.get("type") == "temp":
             dev_id = payload.get("device")
             temp_val = payload.get("val")
+            if temp_val is None:
+                temp_val = 0.0
             
             # Forward directly to dashboard
             summary = {
                 "device": dev_id,
                 "type": "temp",
                 "val": temp_val
+            }
+            asyncio.create_task(broadcast(json.dumps(summary)))
+            
+        elif payload.get("type") == "ppg":
+            # If user flashed ayuScan_2nd.ino, it sends summarized PPG instead of ppg_raw
+            dev_id = payload.get("device")
+            bpm = payload.get("bpm", 0)
+            spo2 = payload.get("spo2", 0)
+            
+            summary = {
+                "device": dev_id,
+                "type": "ppg",
+                "bpm": bpm,
+                "spo2": spo2,
+                "hrv_sdnn": payload.get("hrv_sdnn", 0),
+                "hrv_rmssd": payload.get("hrv_rmssd", 0)
             }
             asyncio.create_task(broadcast(json.dumps(summary)))
 

@@ -41,6 +41,7 @@
 #include "MAX30105.h"          // SparkFun lib, works for MAX30102
 #include "heartRate.h"         // beat detection (for RR intervals / HRV)
 #include "spo2_algorithm.h"    // Maxim SpO2 + HR algorithm
+#include <Adafruit_MLX90614.h> // MLX90614 Temperature Sensor
 
 // ================== USER CONFIG ==================
 #define DEVICE_ID     "patient_01"     // unique per device!
@@ -83,6 +84,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
 #define TCA_ADDR     0x70
 #define MPU6050_CH   0            // unused here
 #define MAX30102_CH  1
+#define MLX90614_CH  2
 
 // ================== ECG SAMPLING ==================
 #define ECG_SAMPLE_RATE_HZ   250
@@ -106,8 +108,10 @@ void tcaSelect(uint8_t channel) {
   Wire.endTransmission();
 }
 
-// ================== MAX30102 ==================
+// ================== MAX30102 & MLX90614 ==================
 MAX30105 maxSensor;
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+bool mlxAvailable = false; // Set true only if MLX is found at startup
 
 // ---- SpO2 (Maxim block algorithm) ----
 #define PPG_BUFFER_SIZE 100      // ~1s @ 100Hz
@@ -398,6 +402,18 @@ void setup() {
   maxSensor.setPulseAmplitudeIR(0x1F);
   maxSensor.setPulseAmplitudeGreen(0);
 
+  // --- init MLX90614 through the mux ---
+  tcaSelect(MLX90614_CH);
+  if (!mlx.begin()) {
+    Serial.println("MLX90614 not found. Temperature will be skipped.");
+    mlxAvailable = false;
+  } else {
+    Serial.println("MLX90614 initialized.");
+    mlxAvailable = true;
+  }
+  // Switch back to MAX30102
+  tcaSelect(MAX30102_CH);
+
   cycleStart = millis();
 
   // --- ECG sample timer (250 Hz) ---
@@ -448,9 +464,21 @@ void loop() {
     lastPPGSend = millis();
     sendPPGPacket();
 
+    // Read Temperature from MLX90614 only if connected
+    if (mlxAvailable && deviceConnected && pVitalsCharacteristic != NULL) {
+      tcaSelect(MLX90614_CH);
+      float objTemp = mlx.readObjectTempC();
+      tcaSelect(MAX30102_CH); // Switch back immediately for next loop's PPG reads
+      
+      char tempMsg[100];
+      snprintf(tempMsg, sizeof(tempMsg), "{\"device\":\"%s\",\"type\":\"temp\",\"val\":%.2f}", DEVICE_ID, objTemp);
+      pVitalsCharacteristic->setValue((uint8_t*)tempMsg, strlen(tempMsg));
+      pVitalsCharacteristic->notify();
+    }
+
     // "label:value,label:value" format is what the Arduino IDE Serial
     // Plotter uses to draw multiple named traces at once.
-    Serial.printf("BPM:%d,SpO2:%d,SDNN:%.1f,RMSSD:%.1f\n",
-                  (int)currentBPM, (int)spo2Value, hrv_sdnn, hrv_rmssd);
+    Serial.printf("BPM:%d,SpO2:%d,SDNN:%.1f,RMSSD:%.1f,Temp:%.2f\n",
+                  (int)currentBPM, (int)spo2Value, hrv_sdnn, hrv_rmssd, objTemp);
   }
 }
