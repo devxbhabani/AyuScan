@@ -8,11 +8,9 @@
 
 #define DEVICE_ID "patient_01"
 
-// --- I2C Settings (No Mux) ---
-// Seeed XIAO ESP32-C6: D4 = GPIO22 (SDA), D5 = GPIO23 (SCL)
-// MAX30102 (0x57) and MLX90614 (0x5A) share the same bus directly
-#define I2C_SDA 4
-#define I2C_SCL 5
+// --- I2C Settings ---
+// I2C Scanner confirmed: 0x57 = MAX30102, 0x5A = MLX90614, 0x68 = unknown
+// Using Wire.begin() — default pins (no manual SDA/SCL define needed)
 
 // --- Pins ---
 #define EXG_PIN 0
@@ -108,7 +106,7 @@ void setup() {
   Serial.println("PinMode set");
 
   // Start I2C at 400kHz (MAX30102 fast mode)
-  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.begin();          // uses board default SDA/SCL pins
   Wire.setClock(400000);
   Serial.println("Wire started");
 
