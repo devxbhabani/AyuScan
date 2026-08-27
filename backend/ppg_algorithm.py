@@ -129,41 +129,64 @@ class PPGProcessor:
         ir_dc  = np.mean(ir_data)
         red_dc = np.mean(red_data)
 
+        # Gate 1: require finger contact (sufficient DC level)
         if ir_dc < self.MIN_IR_STRENGTH or red_dc < 10000:
             return self.last_spo2
 
-        ir_ac  = ir_data  - ir_dc
-        red_ac = red_data - red_dc
+        # Bandpass-filter both channels before extracting AC component.
+        # This removes baseline wander and motion artifacts — the #1 cause
+        # of false low SpO2 readings. Range: 0.5–3.5 Hz (30–210 bpm).
+        nyq = 0.5 * 25.0  # SpO2 buffer is at 25 Hz (downsampled 4:1 from 100Hz)
+        b, a = butter(2, [0.5 / nyq, 3.5 / nyq], btype='band')
+        try:
+            ir_ac_filt  = filtfilt(b, a, ir_data)
+            red_ac_filt = filtfilt(b, a, red_data)
+        except Exception:
+            return self.last_spo2
 
-        ir_rms  = np.sqrt(np.mean(ir_ac  ** 2))
-        red_rms = np.sqrt(np.mean(red_ac ** 2))
+        ir_rms  = np.sqrt(np.mean(ir_ac_filt  ** 2))
+        red_rms = np.sqrt(np.mean(red_ac_filt ** 2))
 
+        # Gate 2: require pulsatile signal (AC/DC ratio check)
         if ir_rms / ir_dc < self.MIN_AC_RATIO:
             return self.last_spo2
 
-        if ir_rms > 0:
-            ratio    = (red_rms / red_dc) / (ir_rms / ir_dc)
-            spo2_raw = -45.060 * (ratio ** 2) + 30.354 * ratio + 94.845
+        if ir_rms <= 0:
+            return self.last_spo2
 
-            if 85 <= spo2_raw <= 100:
-                if len(self.spo2_history) >= 3:
-                    median_val = sorted(self.spo2_history)[len(self.spo2_history) // 2]
-                    if abs(spo2_raw - median_val) > 6:
-                        return self.last_spo2
+        ratio = (red_rms / red_dc) / (ir_rms / ir_dc)
 
-                if self.spo2_ema == 0.0:
-                    self.spo2_ema = spo2_raw
-                else:
-                    self.spo2_ema = (self.spo2_ema_alpha * spo2_raw
-                                     + (1 - self.spo2_ema_alpha) * self.spo2_ema)
+        # Gate 3: physiological ratio range.
+        # At SpO2=100%: ratio≈0.4; at SpO2=80%: ratio≈1.0.
+        # Values outside 0.3–1.2 are motion artifacts, not physiology.
+        if not (0.3 <= ratio <= 1.2):
+            return self.last_spo2
 
-                self.spo2_history.append(spo2_raw)
-                if len(self.spo2_history) > self.spo2_history_size:
-                    self.spo2_history.pop(0)
+        spo2_raw = -45.060 * (ratio ** 2) + 30.354 * ratio + 94.845
 
-                self.last_spo2 = int(round(self.spo2_ema))
+        # Gate 4: physiological SpO2 range for a healthy person
+        if not (85 <= spo2_raw <= 100):
+            return self.last_spo2
 
+        # Gate 5: tight outlier rejection — reject if deviates > 3% from history
+        if len(self.spo2_history) >= 3:
+            median_val = float(np.median(self.spo2_history))
+            if abs(spo2_raw - median_val) > 3:
+                return self.last_spo2
+
+        # EMA smoothing (alpha=0.1: very slow, very stable)
+        if self.spo2_ema == 0.0:
+            self.spo2_ema = spo2_raw
+        else:
+            self.spo2_ema = 0.1 * spo2_raw + 0.9 * self.spo2_ema
+
+        self.spo2_history.append(spo2_raw)
+        if len(self.spo2_history) > self.spo2_history_size:
+            self.spo2_history.pop(0)
+
+        self.last_spo2 = int(round(self.spo2_ema))
         return self.last_spo2
+
 
     # ---- Main entry point ----
     def process_samples(self, ir_array, red_array):
