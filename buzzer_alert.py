@@ -34,7 +34,7 @@ HR_WARN     = 100  # elevated          → 2 beeps
 HR_ALERT    = 120  # very high         → 4 fast beeps
 
 # Minimum seconds between same-level alerts (prevents alarm fatigue)
-COOLDOWN_SEC = 15
+COOLDOWN_SEC = 10
 # ───────────────────────────────────────────────────────────────
 
 
@@ -58,8 +58,8 @@ def beep(times: int, on_ms: int = 150, off_ms: int = 100):
             time.sleep(off_ms / 1000)
 
 
-def rapid_beep(duration_sec: float = 3.0, hz: int = 4):
-    """Continuous rapid beeps for `duration_sec` seconds at `hz` Hz."""
+def rapid_beep(duration_sec: float = 5.0, hz: int = 10):
+    """Continuous rapid beeps at 10 Hz (10 beeps/sec) — urgent alarm."""
     interval = 1.0 / hz
     end = time.time() + duration_sec
     while time.time() < end:
@@ -99,16 +99,33 @@ async def listen(host: str, port: int = 8080):
             async for raw in ws:
                 try:
                     data = json.loads(raw)
-                    spo2 = int(data.get("spo2", 0))
-                    bpm  = int(data.get("bpm",  0))
-                    print(f"[Vitals] bpm={bpm}  spo2={spo2}%")
-                    await handle_vitals(spo2, bpm)
+                    msg_type = data.get("type", "")
+
+                    # ── Immediate trigger on AI warning ──────────────────
+                    # spo2_warning fires as soon as the trend model detects
+                    # a decline — much faster than waiting for EMA to drop.
+                    if msg_type == "spo2_warning":
+                        condition = data.get("condition", "")
+                        if condition in ("Rapid Decline", "Critical"):
+                            if can_alert("spo2_alert"):
+                                print(f"[BUZZER] AI SpO2 warning: {condition} — beeping NOW!")
+                                await asyncio.to_thread(rapid_beep, 4.0, 5)
+                        continue
+
+                    # ── Fallback: raw SpO2 value below hard threshold ─────
+                    if msg_type == "ppg":
+                        spo2 = int(data.get("spo2", 0))
+                        bpm  = int(data.get("bpm",  0))
+                        print(f"[Vitals] bpm={bpm}  spo2={spo2}%")
+                        await handle_vitals(spo2, bpm)
+
                 except (json.JSONDecodeError, KeyError, ValueError):
                     pass  # ignore malformed packets
 
         except websockets.ConnectionClosed:
             print("[Buzzer] Connection lost — retrying in 5s…")
             await asyncio.sleep(5)
+
 
 
 if __name__ == "__main__":
