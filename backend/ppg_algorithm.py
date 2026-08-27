@@ -81,14 +81,14 @@ class PPGProcessor:
         filtered = filtfilt(b, a, ir)
 
         # min_dist = 0.5s → max 120 bpm (increased from 0.4s to skip dicrotic notch)
-        # width = min 8 samples (80ms) → rejects narrow dicrotic notch peaks
-        # prominence = 0.3*std → rejects small noise peaks
+        # width = min 6 samples (60ms) → rejects narrow dicrotic notch peaks (was 8)
+        # prominence = 0.2*std → rejects small noise peaks (was 0.3)
         min_dist = int(0.5 * self.fs)
         peaks, _ = find_peaks(
             filtered,
             distance=min_dist,
-            prominence=0.3 * np.std(filtered),
-            width=int(0.08 * self.fs)   # systolic peaks are wide (~200ms); dicrotic is narrow
+            prominence=0.2 * np.std(filtered),
+            width=int(0.06 * self.fs)   # reduced from 0.08 to prevent missing true peaks
         )
 
         if len(peaks) < 2:
@@ -133,48 +133,37 @@ class PPGProcessor:
         if ir_dc < self.MIN_IR_STRENGTH or red_dc < 10000:
             return self.last_spo2
 
-        # Bandpass-filter both channels before extracting AC component.
-        # This removes baseline wander and motion artifacts — the #1 cause
-        # of false low SpO2 readings. Range: 0.5–3.5 Hz (30–210 bpm).
-        nyq = 0.5 * 25.0  # SpO2 buffer is at 25 Hz (downsampled 4:1 from 100Hz)
-        b, a = butter(2, [0.5 / nyq, 3.5 / nyq], btype='band')
-        try:
-            ir_ac_filt  = filtfilt(b, a, ir_data)
-            red_ac_filt = filtfilt(b, a, red_data)
-        except Exception:
-            return self.last_spo2
-
-        ir_rms  = np.sqrt(np.mean(ir_ac_filt  ** 2))
-        red_rms = np.sqrt(np.mean(red_ac_filt ** 2))
+        # Compute AC as the std of DC-removed signal.
+        # std is more robust than RMS because it naturally centers on 0
+        # even if there is slight baseline drift within the 4s window.
+        ir_ac  = np.std(ir_data)
+        red_ac = np.std(red_data)
 
         # Gate 2: require pulsatile signal (AC/DC ratio check)
-        if ir_rms / ir_dc < self.MIN_AC_RATIO:
+        if ir_ac / ir_dc < self.MIN_AC_RATIO or ir_ac == 0:
             return self.last_spo2
 
-        if ir_rms <= 0:
-            return self.last_spo2
-
-        ratio = (red_rms / red_dc) / (ir_rms / ir_dc)
+        ratio = (red_ac / red_dc) / (ir_ac / ir_dc)
 
         # Gate 3: physiological ratio range.
-        # At SpO2=100%: ratio≈0.4; at SpO2=80%: ratio≈1.0.
-        # Values outside 0.3–1.2 are motion artifacts, not physiology.
-        if not (0.3 <= ratio <= 1.2):
+        # SpO2=99%: ratio≈0.4,  SpO2=95%: ratio≈0.6,  SpO2=90%: ratio≈0.85.
+        # Values outside 0.3–1.0 are motion artifacts or no-contact — reject them.
+        if not (0.3 <= ratio <= 1.0):
             return self.last_spo2
 
         spo2_raw = -45.060 * (ratio ** 2) + 30.354 * ratio + 94.845
 
-        # Gate 4: physiological SpO2 range for a healthy person
+        # Gate 4: physiological SpO2 range
         if not (85 <= spo2_raw <= 100):
             return self.last_spo2
 
-        # Gate 5: tight outlier rejection — reject if deviates > 3% from history
+        # Gate 5: outlier rejection — reject if > 3% from recent median
         if len(self.spo2_history) >= 3:
             median_val = float(np.median(self.spo2_history))
             if abs(spo2_raw - median_val) > 3:
                 return self.last_spo2
 
-        # EMA smoothing (alpha=0.1: very slow, very stable)
+        # EMA smoothing (alpha=0.1 → very stable, slow to change)
         if self.spo2_ema == 0.0:
             self.spo2_ema = spo2_raw
         else:
@@ -186,6 +175,7 @@ class PPGProcessor:
 
         self.last_spo2 = int(round(self.spo2_ema))
         return self.last_spo2
+
 
 
     # ---- Main entry point ----
@@ -224,11 +214,6 @@ class PPGProcessor:
         good_contact = (self.cycle_total_samples > 0 and
                         self.cycle_good_contact >= int(self.cycle_total_samples * 0.5))
 
-        if not good_contact:
-            self.cycles_since_good_contact += 1
-        else:
-            self.cycles_since_good_contact = 0
-
         if good_contact:
             raw_bpm, valid_rr = self._compute_bpm_from_buffer()
             if valid_rr:
@@ -238,14 +223,20 @@ class PPGProcessor:
             if smoothed > 0:
                 self.current_bpm = int(round(smoothed))
                 self.last_good_bpm = self.current_bpm
-            elif self.cycles_since_good_contact < self.max_hold_cycles:
+                self.cycles_since_good_contact = 0
+            else:
+                # Finger is on, but signal is too noisy/weak to find peaks
+                self.cycles_since_good_contact += 1
+                if self.cycles_since_good_contact < self.max_hold_cycles:
+                    self.current_bpm = self.last_good_bpm
+                else:
+                    self._reset()
+        else:
+            self.cycles_since_good_contact += 1
+            if self.cycles_since_good_contact < self.max_hold_cycles:
                 self.current_bpm = self.last_good_bpm
             else:
                 self._reset()
-        elif self.cycles_since_good_contact < self.max_hold_cycles:
-            self.current_bpm = self.last_good_bpm
-        else:
-            self._reset()
 
         self.cycle_total_samples  = 0
         self.cycle_good_contact   = 0
