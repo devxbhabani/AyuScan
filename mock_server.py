@@ -52,22 +52,18 @@ def jitter(val, amount=0.5):
 
 
 def get_scenario(elapsed):
-    """Return target vitals based on elapsed seconds. Shortened for fast demo."""
-    if elapsed < 10:
+    """Return target vitals based on elapsed seconds. Ultra-fast demo (30s)."""
+    if elapsed < 5:
         return {"spo2": 98, "hr": 72, "temp": 36.5, "sbp": 118, "dbp": 76,
                 "label": "Normal Resting"}
-    elif elapsed < 20:
-        return {"spo2": 97, "hr": 88, "temp": 36.9, "sbp": 125, "dbp": 80,
-                "label": "Mild Exertion"}
-    elif elapsed < 30:
+    elif elapsed < 10:
         return {"spo2": 95, "hr": 102, "temp": 37.2, "sbp": 132, "dbp": 85,
                 "label": "Elevated Stress"}
-    elif elapsed < 45:
-        # SpO2 drops to 82% — well below 90 threshold, buzzer will fire after 3 readings
+    elif elapsed < 20:
+        # SpO2 drops to 82% — buzzer will fire after 3 readings (~13 seconds in)
         return {"spo2": 82, "hr": 115, "temp": 37.5, "sbp": 138, "dbp": 90,
                 "label": "⚠ SpO2 CRITICAL DROP"}
-    elif elapsed < 55:
-        # Partial recovery — still below recover threshold (93%)
+    elif elapsed < 25:
         return {"spo2": 87, "hr": 108, "temp": 37.3, "sbp": 133, "dbp": 87,
                 "label": "Slow Recovery"}
     else:
@@ -108,8 +104,8 @@ async def stream_fake_data():
             })
             await broadcast(temp_msg)
 
-        # ── Blood Pressure (every 10s) ────────────────────────────────
-        if int(elapsed) % 10 == 0 and int(elapsed) > 0:
+        # ── Blood Pressure (every 5s) ────────────────────────────────
+        if int(elapsed) % 5 == 0 and int(elapsed) > 0:
             bp_msg = json.dumps({
                 "device": DEVICE_ID,
                 "type": "bp",
@@ -121,7 +117,7 @@ async def stream_fake_data():
             print(f"[Mock] BP sent: {s['sbp']}/{s['dbp']}")
 
         # ── SpO2 AI Warning (trigger once at scenario change) ─────────
-        if 30 <= elapsed <= 31:
+        if 10 <= elapsed <= 11:
             warn_msg = json.dumps({
                 "device": DEVICE_ID,
                 "type": "spo2_warning",
@@ -131,7 +127,7 @@ async def stream_fake_data():
             print("[Mock] SpO2 warning sent: Rapid Decline")
 
         # ── ECG AI label ──────────────────────────────────────────────
-        if 20 <= elapsed <= 21:
+        if 5 <= elapsed <= 6:
             ai_msg = json.dumps({
                 "device": DEVICE_ID,
                 "type": "ai_prediction",
