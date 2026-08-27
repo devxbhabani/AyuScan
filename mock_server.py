@@ -63,11 +63,16 @@ def get_scenario(elapsed):
         return {"spo2": 95, "hr": 102, "temp": 37.2, "sbp": 132, "dbp": 85,
                 "label": "Elevated Stress"}
     elif elapsed < 120:
-        return {"spo2": 88, "hr": 110, "temp": 37.5, "sbp": 138, "dbp": 90,
-                "label": "SpO2 Alert!"}
+        # SpO2 drops to 82% — well below 90 threshold, buzzer will fire after 3 readings
+        return {"spo2": 82, "hr": 115, "temp": 37.5, "sbp": 138, "dbp": 90,
+                "label": "⚠ SpO2 CRITICAL DROP"}
+    elif elapsed < 150:
+        # Partial recovery — still below recover threshold (93%)
+        return {"spo2": 87, "hr": 108, "temp": 37.3, "sbp": 133, "dbp": 87,
+                "label": "Slow Recovery"}
     else:
         return {"spo2": 97, "hr": 78, "temp": 36.8, "sbp": 120, "dbp": 78,
-                "label": "Recovery"}
+                "label": "Full Recovery"}
 
 
 async def stream_fake_data():
