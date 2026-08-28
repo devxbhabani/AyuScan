@@ -311,6 +311,17 @@ def handle_ble_notification(sender, data: bytearray):
             }
             asyncio.create_task(broadcast(json.dumps(summary)))
             
+        elif payload.get("type") == "fall":
+            dev_id = payload.get("device")
+            print(f"[Alert] FALL DETECTED on {dev_id}!")
+            
+            # Forward directly to dashboard
+            summary = {
+                "device": dev_id,
+                "type": "fall"
+            }
+            asyncio.create_task(broadcast(json.dumps(summary)))
+            
         elif payload.get("type") == "ppg":
             # If user flashed ayuScan_2nd.ino, it sends summarized PPG instead of ppg_raw
             dev_id = payload.get("device")
