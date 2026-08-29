@@ -322,6 +322,7 @@ def handle_ble_notification(sender, data: bytearray):
             }
             asyncio.create_task(broadcast(json.dumps(summary)))
             
+            
         elif payload.get("type") == "ppg":
             # If user flashed ayuScan_2nd.ino, it sends summarized PPG instead of ppg_raw
             dev_id = payload.get("device")

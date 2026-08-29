@@ -11,7 +11,9 @@ function App() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
-  const [selectedDevice, setSelectedDevice] = useState(null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(null);
+
+  const selectedDevice = devices.find(d => d.id === selectedDeviceId);
 
   const numDevices = devices.length;
   const maxDevicesPerPage = 4;
@@ -40,7 +42,7 @@ function App() {
   const visibleDevices = devices.slice(startIndex, startIndex + maxDevicesPerPage);
 
   const handleDeviceSelectFromSidebar = (device) => {
-    setSelectedDevice(device);
+    setSelectedDeviceId(device.id);
     setIsSidebarOpen(false);
   };
 
@@ -69,7 +71,7 @@ function App() {
               key={device.id} 
               device={device} 
               history={historyData[device.id]} 
-              onClick={() => setSelectedDevice(device)}
+              onClick={() => setSelectedDeviceId(device.id)}
             />
           ))}
         </main>
@@ -97,7 +99,7 @@ function App() {
         <PatientDetailsModal 
           device={selectedDevice}
           history={historyData[selectedDevice.id]}
-          onClose={() => setSelectedDevice(null)}
+          onClose={() => setSelectedDeviceId(null)}
         />
       )}
 
