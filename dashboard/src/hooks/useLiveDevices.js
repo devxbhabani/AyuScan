@@ -74,7 +74,7 @@ export function useLiveDevices() {
                       // Simulated values for BP and Temp since ESP32 doesn't send them yet
                       sys: d.vitals.sys === '--' ? 120 : d.vitals.sys,
                       dia: d.vitals.dia === '--' ? 80 : d.vitals.dia,
-                      temp: d.vitals.temp === '--' ? 36.5 : d.vitals.temp
+                      temp: d.vitals.temp === '--' ? 97.7 : d.vitals.temp
                     }
                   };
                 }
@@ -125,7 +125,7 @@ export function useLiveDevices() {
                     ...d,
                     vitals: {
                       ...d.vitals,
-                      temp: Number(data.val).toFixed(1)
+                      temp: Number((data.val * 9/5) + 32).toFixed(1)
                     }
                   };
                 }

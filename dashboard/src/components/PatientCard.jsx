@@ -152,7 +152,7 @@ const PatientCard = ({ device, history, isExpanded, onClick }) => {
               <Thermometer className="icon" size={14} />
             </div>
             <div className="metric-value">
-              {device.vitals.temp} <span className="metric-unit">°C</span>
+              {device.vitals.temp} <span className="metric-unit">°F</span>
             </div>
           </div>
         </div>
